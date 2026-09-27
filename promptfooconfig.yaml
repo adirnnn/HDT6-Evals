@@ -1,0 +1,73 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+description: HDT6 evals del agente de Parachute S.A. (arquitectura centralizada)
+
+# el prompt es solo el mensaje del usuario: el agente ya trae sus propias
+# instrucciones, promptfoo solo le pasa la pregunta
+prompts:
+  - '{{pregunta}}'
+
+providers:
+  - id: file://evals/provider.py
+    label: agente_centralizado
+
+defaultTest:
+  options:
+    # grader de las assertions model graded (factuality, context-faithfulness).
+    # se usa un modelo mas grande que el del agente (20b) para calificarlo
+    provider:
+      id: groq:openai/gpt-oss-120b
+      config:
+        temperature: 0
+
+# groq gratis tiene limite de tokens por minuto: un caso a la vez
+evaluateOptions:
+  maxConcurrency: 1
+
+tests:
+  - description: 'smoke faqs: edad minima'
+    vars:
+      pregunta: ¿Cuál es la edad mínima para realizar un salto?
+    assert:
+      - type: python
+        value: file://evals/asserts/herramientas.py:delego_en
+        config:
+          agente: agente_faqs
+          no_delegar: [agente_agenda]
+      - type: python
+        value: file://evals/asserts/herramientas.py:uso_herramienta
+        config:
+          herramienta: buscar_en_faqs
+          no_usar: [agendar_cita, consultar_clima]
+      - type: python
+        value: file://evals/asserts/herramientas.py:recupero_ficha
+        config:
+          ficha: FAQ-023
+      - type: latency
+        threshold: 30000
+
+  - description: 'smoke agenda: dia ideal'
+    vars:
+      pregunta: Quiero agendar una cita para el 2026-10-02 a nombre de Ana
+      clima_simulado:
+        temperatura: 28
+        precipitacion: 0
+        nubes: 10
+        viento: 8
+        rafaga: 15
+    assert:
+      - type: icontains
+        value: '2026-10-02'
+      - type: python
+        value: file://evals/asserts/herramientas.py:uso_herramienta
+        config:
+          herramienta: agendar_cita
+          argumentos:
+            fecha: '2026-10-02'
+      - type: python
+        value: file://evals/asserts/herramientas.py:cita_guardada
+        config:
+          esperada: true
+          fecha: '2026-10-02'
+          veredicto: IDEAL
+      - type: factuality
+        value: La cita del 2026-10-02 quedo confirmada porque las condiciones son ideales para saltar.

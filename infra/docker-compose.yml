@@ -6,6 +6,7 @@ services:
   db:
     image: pgvector/pgvector:pg16
     container_name: parachute_pgvector_evals
+    restart: unless-stopped
     environment:
       POSTGRES_USER: parachute
       POSTGRES_PASSWORD: parachute
