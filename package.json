@@ -1,0 +1,14 @@
+{
+  "name": "hdt6-evals",
+  "version": "1.0.0",
+  "private": true,
+  "description": "HDT6 CC3116: evals con promptfoo del agente de Parachute S.A.",
+  "scripts": {
+    "eval": "promptfoo eval --no-cache",
+    "report": "promptfoo eval --no-cache -o reports/reporte.html -o reports/reporte.json",
+    "view": "promptfoo view"
+  },
+  "devDependencies": {
+    "promptfoo": "0.123.1"
+  }
+}

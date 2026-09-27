@@ -1,0 +1,22 @@
+# secretos: nunca subir la API Key ni credenciales
+.env
+.env.local
+
+# entorno y cache de python
+.venv/
+__pycache__/
+*.pyc
+
+# dependencias de node (promptfoo)
+node_modules/
+
+# datos generados en tiempo de ejecucion
+app/data/
+
+# configuracion local del editor
+.vscode/
+.idea/
+
+# logs
+npm-debug.log*
+*.log
