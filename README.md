@@ -76,7 +76,14 @@ una cita para el 2026-10-02"); para salir escribe `Bye` o presiona `Ctrl+C`.
 npm run eval      # corre todos los casos (sin cache, para medir latencia real)
 npm run report    # corre y guarda reports/reporte.html y reports/reporte.json
 npm run view      # abre el visor web de promptfoo
+python evals/resumen.py   # tablas de resultados a partir de reports/reporte.json
 ```
+
+La corrida completa (25 casos) tarda unos 25 minutos por la pausa de 45 s
+entre turnos (ver "Ritmo de la corrida"). El reporte entregable esta en
+[`reports/reporte.html`](reports/reporte.html) (se abre en el navegador) y
+[`reports/reporte.json`](reports/reporte.json) (los datos crudos, con la
+traza de tools de cada caso en `metadata`).
 
 ### Como funciona el provider
 
@@ -221,3 +228,122 @@ Cada caso combina:
   `agenda_consistente` revisa que si la tool confirmo haya exactamente una
   cita guardada y la respuesta lo diga, y que si rechazo no haya nada guardado
   ni la respuesta diga lo contrario.
+
+## Resultados
+
+Corrida completa del 29 de septiembre de 2026 (`reports/reporte.html`): 25
+casos, 0 errores, 0 rechazos por rate limit.
+
+| Funcionalidad | Casos que pasan | Latencia p50 | Latencia p95 | Reintentos 429 |
+|---|---|---|---|---|
+| FAQs | 10/12 (83%) | 1.8 s | 2.5 s | 0 |
+| Agenda | 4/13 (31%) | 2.0 s | 2.8 s | 0 |
+
+Por familia de eval (assertions que pasan):
+
+| Familia de eval | FAQs | Agenda |
+|---|---|---|
+| Factuality | 9/11 (82%) | 8/12 (67%) |
+| RAG (context faithfulness) | 8/9 (89%) | no aplica |
+| Deterministicas (contains / regex) | 28/29 (97%) | 40/48 (83%) |
+| Latencia | 12/12 (100%) | 13/13 (100%) |
+| Tool execution | 31/31 (100%) | 30/37 (81%) |
+
+Un caso pasa solo si pasan todas sus assertions, por eso el porcentaje por
+caso es mas bajo que el de cada familia.
+
+### Analisis: FAQs
+
+Lo que funciona:
+
+* Las 6 fichas con datos concretos se responden bien: factuality y
+  faithfulness de 1.0 en todas. La pregunta parafraseada ("Peso 95 kilos...")
+  tambien encuentra su ficha, asi que la busqueda semantica cumple.
+* Tool execution perfecta: en los 12 casos el manager delego en
+  `agente_faqs`, se ejecuto `buscar_en_faqs`, nunca se toco una tool de
+  agenda, y la ficha esperada vino entre las recuperadas.
+* Latencia muy por debajo del SLA de 15 s (p95 de 2.5 s).
+
+Lo que falla:
+
+* **Parqueo (alucinacion).** La ficha FAQ-003 es una plantilla que no dice si
+  hay parqueo, pero el agente contesta "Hay parqueo disponible". Fallo en todas
+  las corridas que se hicieron durante el desarrollo; factuality y
+  faithfulness lo detectan. El modelo lee la pregunta repetida dentro de la
+  plantilla ("Respuesta detallada para la consulta sobre '¿Hay parqueo...'")
+  como si fuera la respuesta.
+* **Ficha ruidosa FAQ-103.** El corpus trae en esa ficha la respuesta de la
+  velocidad de caida libre. En esta corrida el agente la repitio tal cual como
+  respuesta a "¿a que velocidad de viento se suspenden las operaciones?".
+  En otras corridas si dijo que no tenia el dato, o sea que depende del
+  muestreo del modelo.
+
+Variacion entre corridas: la pregunta fuera del dominio ("capital de
+Francia") paso aqui, pero en una corrida anterior el agente contesto "Paris"
+de su propio conocimiento. Con un solo intento por caso estos resultados son
+una muestra, no una tasa.
+
+### Analisis: agenda
+
+Lo que funciona:
+
+* Cuando se ejecuta `agendar_cita`, el resultado es correcto siempre: el
+  veredicto lo calcula codigo determinista (`evaluar_condiciones`), la cita se
+  guarda solo si es segura y con el veredicto correcto, y la respuesta coincide
+  (lluvia, fecha en lenguaje natural convertida a `2026-10-05`, 16 dias,
+  caso en vivo contra Open-Meteo).
+* Latencia bien dentro del SLA (p95 de 2.8 s, incluidos los casos en vivo).
+
+Lo que falla, y es lo que mas le conviene a Parachute S.A. arreglar antes de
+produccion:
+
+* **Eleccion de herramienta.** Es el problema principal. En 3 casos donde el
+  usuario pidio agendar, el agente uso `consultar_clima` en vez de
+  `agendar_cita`, y en "nubes marginales" le dijo al usuario "La reserva esta
+  lista" sin haber guardado nada. Al reves, en "solo consultar el clima"
+  (el usuario pidio explicitamente no agendar) ejecuto `agendar_cita` y
+  **guardo una cita que nadie pidio**. Las assertions sobre el store de citas
+  son las que atrapan esto: leyendo solo el texto de la respuesta no se nota.
+* **Preguntas innecesarias.** En 3 casos (viento, rafagas, fecha pasada) el
+  agente no hizo nada y pidio el nombre o una aclaracion, aunque el nombre es
+  opcional y el pedido era claro.
+* **Formato.** Le muestra al usuario los codigos internos de la tool
+  (`CITA_CONFIRMADA`) y usa listas con guiones aunque sus instrucciones piden
+  texto plano.
+
+La causa comun es que el especialista de agenda (`gpt-oss-20b`) sigue las
+instrucciones de forma inconsistente: el mismo caso paso en una corrida y
+fallo en otra con un comportamiento distinto.
+
+### Recomendaciones para la siguiente iteracion
+
+1. **Una sola tool para agendar.** Quitar `consultar_clima` del camino de
+   agendar, o que el especialista de agenda solo tenga `agendar_cita` cuando
+   el usuario pide reservar, y aclarar en las instrucciones que el nombre es
+   opcional y que no se pregunta.
+2. **Traducir los codigos de las tools** a texto para el usuario dentro de la
+   propia tool, en vez de confiar en que el modelo los reescriba.
+3. **Indexar pregunta y respuesta** en pgvector (hoy solo se indexa la
+   pregunta) y limpiar las fichas del corpus que no corresponden a su pregunta
+   (FAQ-039, FAQ-103).
+4. **Instruccion explicita para fichas plantilla**: si la ficha no trae datos
+   concretos, decir que no hay detalle y mandar a soporte, sin afirmar nada.
+5. **Probar `gpt-oss-120b` como modelo del agente** con estos mismos evals y
+   comparar: la suite ya esta lista para eso, basta con cambiar `GROQ_MODEL`.
+6. **Correr los evals en cada cambio** y con `--repeat 3` para medir la
+   variacion entre corridas, ahora que se sabe que existe.
+
+### Limitaciones
+
+* Un solo intento por caso: con un modelo que varia entre corridas, los
+  porcentajes son una muestra. `--repeat` da tasas mas confiables a cambio de
+  mas tiempo.
+* El grader tambien varia. En una corrida de desarrollo califico con 0.67 una
+  respuesta correcta sobre camaras porque convirtio el "No." inicial en una
+  afirmacion aparte. Por eso cada caso combina assertions deterministicas con
+  las del grader, y la bitacora del grader (`GRADER_LOG`) permite auditarlo.
+* El `tokenUsage` que reporta el provider es el del manager; el SDK no suma
+  el de las corridas anidadas de los especialistas (`as_tool`).
+* La latencia se mide con 45 s de pausa entre turnos para no chocar con el
+  limite del plan gratis de Groq. En produccion con un plan pagado ese limite
+  no aplica, pero la concurrencia real tambien subiria la latencia.
