@@ -14,6 +14,10 @@ necesitan revisar:
 * contexto y fichas_recuperadas: lo que devolvio la busqueda en pgvector, para
   los evals de rag (context-faithfulness) y para revisar la ficha correcta.
 * citas_guardadas: lo que quedo escrito en el store de citas en este turno.
+* llamadas_llm y reintentos_429: cuantas requests le hizo el agente a groq en
+  el turno y cuantas fueron rechazadas por el limite de tokens por minuto del
+  plan gratis. sirve para separar la latencia propia del agente de la espera
+  por rate limit.
 
 fixtures (test doubles, no se toca el codigo del agente):
 
@@ -46,7 +50,7 @@ import shared.agenda as agenda  # noqa: E402
 import shared.clima as clima  # noqa: E402
 import shared.faqs as faqs  # noqa: E402
 import shared.tools as tools  # noqa: E402
-from centralizado import agente_manager  # noqa: E402
+from centralizado import agente_manager, modelo  # noqa: E402
 
 # fecha fija para los casos con clima simulado. queda antes del evento (29 de
 # septiembre de 2026) para que las fechas de los casos caigan dentro de los 16
@@ -65,9 +69,35 @@ _REGISTRO = contextvars.ContextVar("registro_herramientas", default=None)
 # llamadas
 _LOOP = asyncio.new_event_loop()
 
-# el modelo de embeddings tarda en cargar la primera vez. se carga aca para que
-# esa espera no se cuente como latencia del primer caso
-faqs._modelo()
+# contador de requests http del agente a groq en el turno actual (los casos
+# corren de a uno, asi que basta con un dict que se reinicia en cada turno)
+_HTTP = {"llamadas": 0, "reintentos_429": 0}
+
+
+async def _contar_respuesta(respuesta):
+    _HTTP["llamadas"] += 1
+    if respuesta.status_code == 429:
+        _HTTP["reintentos_429"] += 1
+
+
+# hook sobre el cliente httpx que usa el modelo del agente (el mismo objeto
+# para el manager y los especialistas). solo observa, no cambia nada
+modelo._client._client.event_hooks["response"].append(_contar_respuesta)
+
+_LISTO = False
+
+
+def _calentar():
+    # el modelo de embeddings tarda unos 25 s en cargar y la primera conexion a
+    # pgvector tambien toma su tiempo. se hace una vez, antes de medir el primer
+    # turno, para que esa espera no se cuente como latencia. no se hace al
+    # importar porque promptfoo le da solo 30 s al worker de python para
+    # arrancar
+    global _LISTO
+    if not _LISTO:
+        faqs._modelo()
+        faqs._conectar()
+        _LISTO = True
 
 
 def _trazar(nombre, funcion):
@@ -207,6 +237,8 @@ def _uso(result):
 
 async def _correr(prompt):
     registro = []
+    _HTTP["llamadas"] = 0
+    _HTTP["reintentos_429"] = 0
     token = _REGISTRO.set(registro)
     try:
         inicio = time.perf_counter()
@@ -219,6 +251,7 @@ async def _correr(prompt):
 
 def call_api(prompt, options, context):
     variables = (context or {}).get("vars", {}) or {}
+    _calentar()
 
     with _Fixtures(variables) as fx:
         prompt = _resolver_fechas(prompt, fx.hoy_efectivo())
@@ -250,5 +283,7 @@ def call_api(prompt, options, context):
             "contexto": contexto,
             "fichas_recuperadas": fichas,
             "citas_guardadas": citas,
+            "llamadas_llm": _HTTP["llamadas"],
+            "reintentos_429": _HTTP["reintentos_429"],
         },
     }

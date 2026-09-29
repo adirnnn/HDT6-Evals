@@ -11,9 +11,16 @@ parametros por el campo config de la assertion, por ejemplo:
 
 cada funcion devuelve un GradingResult (pass, score, reason) para que el
 reporte explique por que paso o fallo.
+
+en los casos contra open-meteo real las fechas se escriben relativas, como
+[HOY+2]; se resuelven con metadata.hoy, el mismo "hoy" que uso el provider.
 """
 
 import json
+import re
+from datetime import date, timedelta
+
+_FECHA_RELATIVA = re.compile(r"^\[HOY([+-]\d+)?\]$")
 
 
 def _metadata(context):
@@ -29,6 +36,17 @@ def _config(context):
 
 def _resultado(ok, razon):
     return {"pass": bool(ok), "score": 1.0 if ok else 0.0, "reason": razon}
+
+
+def _resolver(valor, context):
+    # cambia [HOY+n] por la fecha real que uso el provider en ese turno
+    if not isinstance(valor, str):
+        return valor
+    m = _FECHA_RELATIVA.match(valor.strip())
+    if not m:
+        return valor
+    hoy = date.fromisoformat(_metadata(context)["hoy"])
+    return (hoy + timedelta(days=int(m.group(1) or 0))).isoformat()
 
 
 def _nombres(llamadas):
@@ -70,7 +88,7 @@ def uso_herramienta(output, context):
     if not candidatas:
         return _resultado(False, f"no se ejecuto {esperada} (tools: {nombres or 'ninguna'})")
 
-    argumentos = cfg.get("argumentos") or {}
+    argumentos = {k: _resolver(v, context) for k, v in (cfg.get("argumentos") or {}).items()}
     if argumentos:
         for c in candidatas:
             reales = c.get("argumentos", {})
@@ -122,6 +140,39 @@ def cita_guardada(output, context):
         return _resultado(False, f"se esperaba exactamente 1 cita guardada y hay {len(citas)}")
     cita = citas[0]
     for campo in ("fecha", "veredicto"):
-        if campo in cfg and cita.get(campo) != cfg[campo]:
-            return _resultado(False, f"la cita tiene {campo}={cita.get(campo)}, se esperaba {cfg[campo]}")
+        esperado = _resolver(cfg.get(campo), context)
+        if campo in cfg and cita.get(campo) != esperado:
+            return _resultado(False, f"la cita tiene {campo}={cita.get(campo)}, se esperaba {esperado}")
     return _resultado(True, f"cita guardada: fecha={cita.get('fecha')} veredicto={cita.get('veredicto')}")
+
+
+def agenda_consistente(output, context):
+    """para los casos con clima real, donde no se sabe de antemano si la cita
+    se puede agendar: revisa que la herramienta, el store y la respuesta al
+    usuario cuenten la misma historia.
+
+    * si agendar_cita devolvio CITA_CONFIRMADA, tiene que haber exactamente una
+      cita guardada con esa fecha y la respuesta tiene que confirmarla.
+    * si devolvio NO_SE_PUDO_AGENDAR, no puede haber cita guardada y la
+      respuesta no puede decir que quedo confirmada."""
+    meta = _metadata(context)
+    llamadas = [c for c in meta.get("herramientas", []) if c.get("herramienta") == "agendar_cita"]
+    if not llamadas:
+        return _resultado(False, "no se ejecuto agendar_cita")
+    resultado = llamadas[-1].get("resultado", "")
+    citas = meta.get("citas_guardadas", [])
+    texto = output.lower()
+
+    if resultado.startswith("CITA_CONFIRMADA"):
+        fecha = llamadas[-1].get("argumentos", {}).get("fecha")
+        if len(citas) != 1 or citas[0].get("fecha") != fecha:
+            return _resultado(False, f"la tool confirmo la cita del {fecha} pero el store tiene {citas}")
+        if not re.search(r"confirm|agend|reserv", texto):
+            return _resultado(False, "la tool confirmo la cita pero la respuesta no lo dice")
+        return _resultado(True, f"cita confirmada y guardada para {fecha}, la respuesta lo confirma")
+
+    if citas:
+        return _resultado(False, f"la tool no agendo pero el store tiene {citas}")
+    if re.search(r"(?<!no\s)(qued[oó]|est[aá])\s+(confirmad|agendad|reservad)|cita_confirmada", texto):
+        return _resultado(False, "la tool rechazo la cita pero la respuesta dice que quedo confirmada")
+    return _resultado(True, "la tool rechazo la cita, no se guardo nada y la respuesta no la confirma")

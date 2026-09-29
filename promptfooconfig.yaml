@@ -9,65 +9,36 @@ prompts:
 providers:
   - id: file://evals/provider.py
     label: agente_centralizado
+    # pausa despues de cada turno del agente, ver la explicacion abajo. va en
+    # el provider porque promptfoo ignora evaluateOptions.delay cuando el
+    # provider ya trae su propio delay (los providers de python lo traen en 0)
+    delay: 45000
 
 defaultTest:
   options:
-    # grader de las assertions model graded (factuality, context-faithfulness).
-    # se usa un modelo mas grande que el del agente (20b) para calificarlo
+    # grader de las assertions model graded (factuality, context-faithfulness,
+    # llm-rubric). es un modelo mas grande que el del agente (120b contra 20b).
+    # se sirve con evals/grader.py en vez de groq: directo, ver ahi el porque
     provider:
-      id: groq:openai/gpt-oss-120b
+      id: file://evals/grader.py
+      label: grader_gpt-oss-120b
       config:
+        model: openai/gpt-oss-120b
         temperature: 0
+        reasoning_effort: low
 
-# groq gratis tiene limite de tokens por minuto: un caso a la vez
+# groq gratis limita cada modelo a 8000 tokens por minuto, y un turno del
+# agente (4 requests entre manager y especialista) gasta de 5000 a 6000 en un
+# par de segundos. si se pasa, groq responde 429 y el cliente de openai espera
+# y reintenta en silencio, y esa espera se contaba como latencia del agente
+# (medido: con 20 s de pausa, desde el septimo caso cada turno tenia de 3 a 5
+# rechazos y tardaba 10 a 16 s en vez de 2). por eso: un caso a la vez y 45 s
+# de pausa entre turnos (delay del provider, arriba), lo que tarda el cupo en
+# recargarse. metadata trae llamadas_llm y reintentos_429 de cada turno para
+# comprobarlo en el reporte
 evaluateOptions:
   maxConcurrency: 1
 
 tests:
-  - description: 'smoke faqs: edad minima'
-    vars:
-      pregunta: ¿Cuál es la edad mínima para realizar un salto?
-    assert:
-      - type: python
-        value: file://evals/asserts/herramientas.py:delego_en
-        config:
-          agente: agente_faqs
-          no_delegar: [agente_agenda]
-      - type: python
-        value: file://evals/asserts/herramientas.py:uso_herramienta
-        config:
-          herramienta: buscar_en_faqs
-          no_usar: [agendar_cita, consultar_clima]
-      - type: python
-        value: file://evals/asserts/herramientas.py:recupero_ficha
-        config:
-          ficha: FAQ-023
-      - type: latency
-        threshold: 30000
-
-  - description: 'smoke agenda: dia ideal'
-    vars:
-      pregunta: Quiero agendar una cita para el 2026-10-02 a nombre de Ana
-      clima_simulado:
-        temperatura: 28
-        precipitacion: 0
-        nubes: 10
-        viento: 8
-        rafaga: 15
-    assert:
-      - type: icontains
-        value: '2026-10-02'
-      - type: python
-        value: file://evals/asserts/herramientas.py:uso_herramienta
-        config:
-          herramienta: agendar_cita
-          argumentos:
-            fecha: '2026-10-02'
-      - type: python
-        value: file://evals/asserts/herramientas.py:cita_guardada
-        config:
-          esperada: true
-          fecha: '2026-10-02'
-          veredicto: IDEAL
-      - type: factuality
-        value: La cita del 2026-10-02 quedo confirmada porque las condiciones son ideales para saltar.
+  - file://evals/tests/faqs.yaml
+  - file://evals/tests/agenda.yaml

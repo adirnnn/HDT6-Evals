@@ -1,0 +1,324 @@
+# evals de la funcionalidad de agendar citas (agente_agenda + consultar_clima /
+# agendar_cita)
+#
+# la mayoria de casos usan clima_simulado: el provider no llama a open-meteo,
+# usa esos datos y congela "hoy" en 2026-09-27, asi el veredicto esperado se
+# conoce de antemano y el caso da lo mismo cualquier dia. los ultimos dos casos
+# van contra open-meteo real con fechas relativas ([HOY+n]).
+#
+# criterio del agente (shared/clima.py), viento y rafagas en km/h:
+#   viento     ideal < 20, marginal 20 a 28, prohibido > 28
+#   rafagas    prohibido > 35
+#   lluvia     prohibido cualquier valor > 0 mm
+#   nubes      ideal < 30%, marginal 30% a 75%, prohibido > 75%
+#
+# cada caso revisa:
+#   factuality       la respuesta dice lo que corresponde al clima del caso
+#   contains / regex la fecha, el motivo del rechazo, texto plano
+#   latency          el turno completo del agente cabe en el sla
+#   tool execution   delego en agente_agenda, corrio la tool correcta con la
+#                    fecha correcta, y la cita quedo guardada solo si era
+#                    seguro saltar (se revisa el store, no solo el texto)
+#
+# las assertions comunes se definen con ancla (&) en el primer caso y se
+# reusan (*) en los demas
+
+- description: 'agenda: dia ideal, se confirma'
+  vars:
+    pregunta: Quiero agendar una cita para el 2026-10-02 a nombre de Ana
+    clima_simulado: &clima_ideal { temperatura: 28, precipitacion: 0, nubes: 10, viento: 8, rafaga: 15 }
+  assert:
+    - type: factuality
+      value: La cita para el 2026-10-02 a nombre de Ana quedó confirmada porque las condiciones son ideales para saltar (viento de 8 km/h, ráfagas de 15 km/h, sin lluvia y 10% de nubes).
+    - &menciona_fecha_1002
+      type: regex
+      value: '(2026-10-02|\b2\s+de\s+octubre)'
+    - type: icontains-any
+      value: [confirmad, agendad, reservad]
+    - type: python
+      value: file://evals/asserts/herramientas.py:uso_herramienta
+      config:
+        herramienta: agendar_cita
+        argumentos: { fecha: '2026-10-02', nombre: Ana }
+    - type: python
+      value: file://evals/asserts/herramientas.py:cita_guardada
+      config: { esperada: true, fecha: '2026-10-02', veredicto: IDEAL }
+    - &delega_agenda
+      type: python
+      value: file://evals/asserts/herramientas.py:delego_en
+      config:
+        agente: agente_agenda
+        no_delegar: [agente_faqs]
+    # el agente responde en una terminal: nada de negritas, encabezados ni vinetas
+    - &texto_plano
+      type: not-regex
+      value: '(\*\*|__|(^|\n)#{1,6}\s|(^|\n)[ \t]*[-*]\s)'
+    - &sin_codigos
+      # los codigos de las tools son para el agente, no para el usuario
+      type: not-regex
+      value: '(?:CITA_CONFIRMADA|NO_SE_PUDO_AGENDAR|FECHA_INVALIDA)'
+    - &latencia
+      type: latency
+      threshold: 15000
+
+- description: 'agenda: viento marginal, se confirma con aviso'
+  vars:
+    pregunta: Agéndame un salto para el 2026-10-01 por favor
+    clima_simulado: { temperatura: 27, precipitacion: 0, nubes: 15, viento: 24, rafaga: 30 }
+  assert:
+    - type: factuality
+      value: La cita para el 2026-10-01 quedó confirmada, pero con condiciones marginales por viento de 24 km/h; solo es recomendable con un instructor tándem experimentado.
+    - type: regex
+      value: '(2026-10-01|\b1\s+de\s+octubre)'
+    - type: icontains
+      value: marginal
+    - type: python
+      value: file://evals/asserts/herramientas.py:uso_herramienta
+      config:
+        herramienta: agendar_cita
+        argumentos: { fecha: '2026-10-01' }
+    - type: python
+      value: file://evals/asserts/herramientas.py:cita_guardada
+      config: { esperada: true, fecha: '2026-10-01', veredicto: MARGINAL }
+    - *delega_agenda
+    - *texto_plano
+    - *sin_codigos
+    - *latencia
+
+- description: 'agenda: nubes marginales, se confirma con aviso'
+  vars:
+    pregunta: Quiero reservar mi salto tándem el 2026-10-04
+    clima_simulado: { temperatura: 26, precipitacion: 0, nubes: 55, viento: 10, rafaga: 18 }
+  assert:
+    - type: factuality
+      value: La cita para el 2026-10-04 quedó confirmada con condiciones marginales porque la cobertura de nubes es de 55%; solo es recomendable con un instructor tándem experimentado.
+    - type: regex
+      value: '(2026-10-04|\b4\s+de\s+octubre)'
+    - type: icontains
+      value: marginal
+    - type: python
+      value: file://evals/asserts/herramientas.py:cita_guardada
+      config: { esperada: true, fecha: '2026-10-04', veredicto: MARGINAL }
+    - type: python
+      value: file://evals/asserts/herramientas.py:uso_herramienta
+      config:
+        herramienta: agendar_cita
+        argumentos: { fecha: '2026-10-04' }
+    - *delega_agenda
+    - *texto_plano
+    - *sin_codigos
+    - *latencia
+
+- description: 'agenda: lluvia, no se agenda'
+  vars:
+    pregunta: Quiero agendar una cita para el 2026-10-02 a nombre de Ana
+    clima_simulado: { temperatura: 24, precipitacion: 2.5, nubes: 40, viento: 10, rafaga: 18 }
+  assert:
+    - type: factuality
+      value: No se pudo agendar la cita del 2026-10-02 porque el pronóstico marca 2.5 mm de lluvia y está prohibido saltar con lluvia; se sugiere elegir otra fecha.
+    # en los rechazos se exige el motivo y no la fecha: la fecha es lo clave
+    # cuando se confirma, el motivo es lo clave cuando se rechaza
+    - type: regex
+      value: '(?:[Ll]luvi|[Pp]recipitaci)'
+    - &no_confirma
+      # la respuesta no puede decir que la cita quedo confirmada. el lookbehind
+      # evita contar negaciones como "no quedo confirmada"
+      type: not-regex
+      value: '(?<![Nn]o\s)(?:[Qq]ued[oó]|[Ee]st[aá])\s+(?:confirmad|agendad|reservad)'
+    - type: python
+      value: file://evals/asserts/herramientas.py:uso_herramienta
+      config:
+        herramienta: agendar_cita
+        argumentos: { fecha: '2026-10-02' }
+    - &sin_cita
+      type: python
+      value: file://evals/asserts/herramientas.py:cita_guardada
+      config: { esperada: false }
+    - *delega_agenda
+    - *texto_plano
+    - *sin_codigos
+    - *latencia
+
+- description: 'agenda: viento prohibido, no se agenda'
+  vars:
+    pregunta: Quiero agendar para el 2026-10-03
+    clima_simulado: { temperatura: 27, precipitacion: 0, nubes: 20, viento: 32, rafaga: 34 }
+  assert:
+    - type: factuality
+      value: No se pudo agendar la cita del 2026-10-03 porque el viento en superficie de 32 km/h excede el máximo de 28 km/h; se sugiere elegir otra fecha.
+    - type: regex
+      value: '(?:[Vv]iento)'
+    - *no_confirma
+    - type: python
+      value: file://evals/asserts/herramientas.py:uso_herramienta
+      config:
+        herramienta: agendar_cita
+        argumentos: { fecha: '2026-10-03' }
+    - *sin_cita
+    - *delega_agenda
+    - *texto_plano
+    - *sin_codigos
+    - *latencia
+
+- description: 'agenda: rafagas prohibidas, no se agenda'
+  vars:
+    pregunta: ¿Me puedes agendar un salto el 2026-10-06?
+    clima_simulado: { temperatura: 27, precipitacion: 0, nubes: 20, viento: 15, rafaga: 42 }
+  assert:
+    - type: factuality
+      value: No se pudo agendar la cita del 2026-10-06 porque hay ráfagas de 42 km/h y el máximo permitido es 35 km/h; se sugiere elegir otra fecha.
+    - type: regex
+      value: '(?:[Rr][aá]fagas?)'
+    - *no_confirma
+    - type: python
+      value: file://evals/asserts/herramientas.py:uso_herramienta
+      config:
+        herramienta: agendar_cita
+        argumentos: { fecha: '2026-10-06' }
+    - *sin_cita
+    - *delega_agenda
+    - *texto_plano
+    - *sin_codigos
+    - *latencia
+
+- description: 'agenda: nubosidad prohibida, no se agenda'
+  vars:
+    pregunta: Quiero agendar una cita para el 2026-10-07
+    clima_simulado: { temperatura: 23, precipitacion: 0, nubes: 90, viento: 9, rafaga: 14 }
+  assert:
+    - type: factuality
+      value: No se pudo agendar la cita del 2026-10-07 porque la cobertura de nubes es de 90%, más del 75% permitido, y no hay visibilidad suficiente; se sugiere elegir otra fecha.
+    - type: regex
+      value: '(?:[Nn]ubes|[Nn]ubosidad|[Vv]isibilidad)'
+    - *no_confirma
+    - type: python
+      value: file://evals/asserts/herramientas.py:uso_herramienta
+      config:
+        herramienta: agendar_cita
+        argumentos: { fecha: '2026-10-07' }
+    - *sin_cita
+    - *delega_agenda
+    - *texto_plano
+    - *sin_codigos
+    - *latencia
+
+- description: 'agenda: fecha pasada, no se agenda'
+  vars:
+    pregunta: Quiero agendar una cita para el 2026-09-20
+    # clima ideal a proposito: si se rechaza es por la fecha y no por el clima
+    clima_simulado: *clima_ideal
+  assert:
+    - type: factuality
+      value: No se puede agendar la cita del 2026-09-20 porque esa fecha ya pasó; hay que elegir una fecha desde hoy en adelante.
+    - type: regex
+      value: '(?:ya\s+pas|pasad|anterior)'
+    - *no_confirma
+    - *sin_cita
+    - *delega_agenda
+    - *texto_plano
+    - *sin_codigos
+    - *latencia
+
+- description: 'agenda: fecha fuera del pronostico (mas de 16 dias)'
+  vars:
+    pregunta: Quiero agendar una cita para el 2026-10-25
+    clima_simulado: *clima_ideal
+  assert:
+    - type: factuality
+      value: No se puede agendar la cita del 2026-10-25 porque el pronóstico del clima solo llega hasta 16 días hacia adelante; hay que elegir una fecha más cercana.
+    - type: regex
+      value: '16\s+d[ií]as'
+    - *no_confirma
+    - *sin_cita
+    - *delega_agenda
+    - *texto_plano
+    - *sin_codigos
+    - *latencia
+
+- description: 'agenda: fecha en lenguaje natural (tool recibe AAAA-MM-DD)'
+  vars:
+    pregunta: Quiero agendar mi salto para el 5 de octubre de 2026 a nombre de Luis
+    clima_simulado: *clima_ideal
+  assert:
+    - type: factuality
+      value: La cita para el 5 de octubre de 2026 a nombre de Luis quedó confirmada con condiciones ideales para saltar.
+    # la tool pide AAAA-MM-DD: el agente tiene que convertir la fecha el mismo
+    - type: python
+      value: file://evals/asserts/herramientas.py:uso_herramienta
+      config:
+        herramienta: agendar_cita
+        argumentos: { fecha: '2026-10-05', nombre: Luis }
+    - type: python
+      value: file://evals/asserts/herramientas.py:cita_guardada
+      config: { esperada: true, fecha: '2026-10-05', veredicto: IDEAL }
+    - *delega_agenda
+    - *texto_plano
+    - *sin_codigos
+    - *latencia
+
+- description: 'agenda: solo consultar el clima, no debe agendar'
+  vars:
+    pregunta: ¿Cómo estará el clima para saltar el 2026-10-03? Solo quiero saber, todavía no agendes nada.
+    clima_simulado: { temperatura: 29, precipitacion: 0, nubes: 12, viento: 11, rafaga: 17 }
+  assert:
+    - type: factuality
+      value: El 2026-10-03 las condiciones son ideales para saltar (29 grados, viento de 11 km/h, ráfagas de 17 km/h, sin lluvia y 12% de nubes). No se agendó ninguna cita.
+    - type: regex
+      value: '11\s*km/h'
+    - *no_confirma
+    - type: python
+      value: file://evals/asserts/herramientas.py:uso_herramienta
+      config:
+        herramienta: consultar_clima
+        no_usar: [agendar_cita]
+        argumentos: { fecha: '2026-10-03' }
+    - *sin_cita
+    - *delega_agenda
+    - *texto_plano
+    - *sin_codigos
+    - *latencia
+
+- description: 'agenda en vivo (open-meteo): consultar el clima de pasado manana'
+  vars:
+    # [HOY+2] lo cambia el provider por la fecha real de pasado manana
+    pregunta: Solo quiero saber cómo estará el clima para saltar el [HOY+2], no agendes nada.
+  assert:
+    # el clima real no se conoce de antemano: no hay factuality, se revisa que
+    # la respuesta use datos de la tool y que no se agende nada
+    - type: llm-rubric
+      value: La respuesta informa el pronóstico del clima para la fecha pedida con datos concretos (por ejemplo viento, lluvia o nubes) y dice si las condiciones son aptas para saltar. No afirma haber agendado una cita.
+    - type: regex
+      value: 'km/h'
+    - *no_confirma
+    - type: python
+      value: file://evals/asserts/herramientas.py:uso_herramienta
+      config:
+        herramienta: consultar_clima
+        no_usar: [agendar_cita]
+        argumentos: { fecha: '[HOY+2]' }
+    - *sin_cita
+    - *delega_agenda
+    - *texto_plano
+    - *sin_codigos
+    - type: latency
+      # 5 s mas que el resto: aca si se espera la respuesta de open-meteo
+      threshold: 20000
+
+- description: 'agenda en vivo (open-meteo): agendar en 3 dias'
+  vars:
+    pregunta: Quiero agendar una cita para el [HOY+3] a nombre de Sofía
+  assert:
+    # no se sabe si el clima real va a permitir la cita: se revisa que la tool,
+    # el store y la respuesta digan lo mismo
+    - type: python
+      value: file://evals/asserts/herramientas.py:agenda_consistente
+    - type: python
+      value: file://evals/asserts/herramientas.py:uso_herramienta
+      config:
+        herramienta: agendar_cita
+        argumentos: { fecha: '[HOY+3]' }
+    - *delega_agenda
+    - *texto_plano
+    - *sin_codigos
+    - type: latency
+      threshold: 20000

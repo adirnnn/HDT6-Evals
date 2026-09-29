@@ -1,0 +1,257 @@
+# evals de la funcionalidad de preguntas frecuentes (agente_faqs + buscar_en_faqs)
+#
+# ground truth: infra/Corpus_FAQs_Parachute_SA_2026.txt. de las 120 fichas, 14
+# traen datos concretos (peso, edad, buceo, altura, velocidad, camaras) y el
+# resto son respuestas plantilla que solo dicen la fecha del evento, la
+# categoria y que se consulte a soporte@parachutesa.gt. los casos cubren las
+# dos clases, mas preguntas fuera del dominio y fichas del corpus que traen una
+# respuesta que no corresponde a su pregunta.
+#
+# cada caso revisa:
+#   factuality            la respuesta coincide con la ficha (grader de groq)
+#   context-faithfulness  lo que dice sale de lo que recupero pgvector (rag)
+#   contains / regex      datos puntuales y formato de texto plano
+#   latency               el turno completo del agente cabe en el sla
+#   tool execution        delego en agente_faqs, corrio buscar_en_faqs, trajo
+#                         la ficha correcta, y no toco las tools de agenda
+
+# las assertions comunes se definen con ancla (&) en el primer caso y se
+# reusan (*) en los demas
+
+- description: 'faqs: peso maximo (ficha con datos)'
+  vars:
+    pregunta: &q1 ¿Cuál es el peso máximo permitido para saltar?
+    query: *q1
+  assert:
+    - type: factuality
+      value: El peso máximo para el salto tándem es de 100 kg. Cada participante es pesado en el registro y si pesa entre 90 kg y 100 kg se cobra un recargo administrativo de Q250.
+    # regex y no icontains: el modelo a veces separa numero y unidad con un
+    # espacio angosto (U+202F) que \s si reconoce
+    - type: regex
+      value: '100\s*kg'
+    - type: regex
+      value: 'Q\s?250'
+    - type: python
+      value: file://evals/asserts/herramientas.py:recupero_ficha
+      config: { fichas: [FAQ-021, FAQ-022, FAQ-074] }
+    - &delega_faqs
+      type: python
+      value: file://evals/asserts/herramientas.py:delego_en
+      config:
+        agente: agente_faqs
+        no_delegar: [agente_agenda]
+    - &usa_busqueda
+      type: python
+      value: file://evals/asserts/herramientas.py:uso_herramienta
+      config:
+        herramienta: buscar_en_faqs
+        no_usar: [agendar_cita, consultar_clima]
+    - &fiel_al_contexto
+      type: context-faithfulness
+      contextTransform: context.metadata.contexto
+      threshold: 0.7
+    # el agente responde en una terminal: nada de negritas, encabezados ni vinetas
+    - &texto_plano
+      type: not-regex
+      value: '(\*\*|__|(^|\n)#{1,6}\s|(^|\n)[ \t]*[-*]\s)'
+    - &latencia
+      type: latency
+      threshold: 15000
+
+- description: 'faqs: edad minima (ficha con datos)'
+  vars:
+    pregunta: &q2 ¿Cuál es la edad mínima para realizar un salto?
+    query: *q2
+  assert:
+    - type: factuality
+      value: La edad mínima es de 18 años cumplidos presentando DPI o pasaporte. Los menores de 16 y 17 años pueden saltar solo si van acompañados de ambos padres o tutores legales, que firman una autorización en el sitio.
+    - type: regex
+      value: '\b18\b'
+    - type: icontains-any
+      value: [DPI, pasaporte]
+    - type: python
+      value: file://evals/asserts/herramientas.py:recupero_ficha
+      config: { fichas: [FAQ-023, FAQ-024, FAQ-025] }
+    - *delega_faqs
+    - *usa_busqueda
+    - *fiel_al_contexto
+    - *texto_plano
+    - *latencia
+
+- description: 'faqs: espera despues de bucear (ficha con datos)'
+  vars:
+    pregunta: &q3 ¿Cuánto tiempo debo esperar tras hacer buceo antes de saltar?
+    query: *q3
+  assert:
+    - type: factuality
+      value: Hay que esperar un mínimo de 24 horas entre la última inmersión de buceo y el salto, para evitar la enfermedad por descompresión.
+    - type: regex
+      value: '24\s*horas'
+    - type: python
+      value: file://evals/asserts/herramientas.py:recupero_ficha
+      config: { ficha: FAQ-029 }
+    - *delega_faqs
+    - *usa_busqueda
+    - *fiel_al_contexto
+    - *texto_plano
+    - *latencia
+
+- description: 'faqs: altura del salto (ficha con datos)'
+  vars:
+    pregunta: &q4 ¿A qué altura se realiza el salto tándem?
+    query: *q4
+  assert:
+    - type: factuality
+      value: El salto se realiza a 3,000 metros (unos 10,000 pies) sobre el nivel del mar y el instructor abre el paracaídas principal a 1,500 metros sobre el terreno.
+    - type: regex
+      value: '3[,.\s]?000\s*(m|metros)'
+    - type: python
+      value: file://evals/asserts/herramientas.py:recupero_ficha
+      config: { fichas: [FAQ-049, FAQ-050] }
+    - *delega_faqs
+    - *usa_busqueda
+    - *fiel_al_contexto
+    - *texto_plano
+    - *latencia
+
+- description: 'faqs: velocidad en caida libre (ficha con datos)'
+  vars:
+    pregunta: &q5 ¿Qué velocidad se alcanza durante la caída libre?
+    query: *q5
+  assert:
+    - type: factuality
+      value: En caída libre se alcanza una velocidad terminal promedio de 200 km/h, que se mantiene unos 35 a 45 segundos antes de abrir el paracaídas principal.
+    - type: regex
+      value: '200\s*km/h'
+    - type: regex
+      value: '35\s*(a|y|-|–)\s*45\s*segundos'
+    - type: python
+      value: file://evals/asserts/herramientas.py:recupero_ficha
+      config: { ficha: FAQ-053 }
+    - *delega_faqs
+    - *usa_busqueda
+    - *fiel_al_contexto
+    - *texto_plano
+    - *latencia
+
+- description: 'faqs: camaras personales (ficha con datos)'
+  vars:
+    pregunta: &q6 ¿Puedo saltar con mi propia GoPro o con mi celular?
+    query: *q6
+  assert:
+    - type: factuality
+      value: No. Por regulaciones de la DGAC y la USPA no se permiten cámaras, celulares ni GoPro personales durante el vuelo o la caída libre. Parachute S.A. ofrece servicio profesional de foto y video.
+    - type: regex
+      value: '(?:[Nn]o\s+(?:se\s+permite|est[aá]\s+permitid|puede|es\s+posible)|prohibid)'
+    - type: python
+      value: file://evals/asserts/herramientas.py:recupero_ficha
+      config: { fichas: [FAQ-081, FAQ-082] }
+    - *delega_faqs
+    - *usa_busqueda
+    - *fiel_al_contexto
+    - *texto_plano
+    - *latencia
+
+- description: 'faqs: pregunta parafraseada sobre peso (busqueda semantica)'
+  vars:
+    pregunta: &q7 Peso 95 kilos, ¿igual puedo saltar o me cobran algo extra?
+    query: *q7
+  assert:
+    - type: factuality
+      value: Sí puede saltar, porque el límite es 100 kg, pero al pesar entre 90 kg y 100 kg se le cobra un recargo administrativo de Q250.
+    - type: regex
+      value: 'Q\s?250'
+    - type: python
+      value: file://evals/asserts/herramientas.py:recupero_ficha
+      config: { fichas: [FAQ-021, FAQ-022, FAQ-074] }
+    - *delega_faqs
+    - *usa_busqueda
+    - *fiel_al_contexto
+    - *texto_plano
+    - *latencia
+
+- description: 'faqs: fecha del evento (fichas plantilla)'
+  vars:
+    pregunta: &q8 ¿Qué día es el evento de paracaidismo de Parachute S.A.?
+    query: *q8
+  assert:
+    - type: factuality
+      value: El evento de Parachute S.A. es el 29 de septiembre de 2026 en Guatemala.
+    - type: regex
+      value: '(29\s+de\s+septiembre|2026-09-29|29/09/2026)'
+    - *delega_faqs
+    - *usa_busqueda
+    - *fiel_al_contexto
+    - *texto_plano
+    - *latencia
+
+- description: 'faqs: parqueo (ficha plantilla, no debe inventar detalles)'
+  vars:
+    pregunta: &q9 ¿Hay parqueo disponible en el lugar del evento?
+    query: *q9
+  assert:
+    - type: factuality
+      value: La base de conocimientos no trae detalles específicos del parqueo; para eso hay que consultar a soporte@parachutesa.gt. El evento es el 29 de septiembre de 2026 en Guatemala.
+    - type: icontains
+      value: soporte@parachutesa.gt
+    - type: python
+      value: file://evals/asserts/herramientas.py:recupero_ficha
+      config: { fichas: [FAQ-003, FAQ-018] }
+    - *delega_faqs
+    - *usa_busqueda
+    - *fiel_al_contexto
+    - *texto_plano
+    - *latencia
+
+- description: 'faqs: pregunta fuera del dominio'
+  vars:
+    pregunta: &q10 ¿Cuál es la capital de Francia?
+    query: *q10
+  assert:
+    # el agente no es un asistente general: no contesta de su conocimiento y
+    # manda a soporte, como piden sus instrucciones
+    - type: not-icontains
+      value: París
+    - type: not-icontains
+      value: Paris
+    - type: icontains
+      value: soporte@parachutesa.gt
+    - type: python
+      value: file://evals/asserts/herramientas.py:uso_herramienta
+      config:
+        herramienta: buscar_en_faqs
+        no_usar: [agendar_cita, consultar_clima]
+    - *texto_plano
+    - *latencia
+
+- description: 'faqs: tema sin ficha (seguro de viaje internacional)'
+  vars:
+    pregunta: &q11 ¿Venden seguros de viaje internacional para turistas?
+    query: *q11
+  assert:
+    - type: factuality
+      value: No hay información sobre seguros de viaje internacional en la base de conocimientos; se sugiere escribir a soporte@parachutesa.gt.
+    - type: icontains
+      value: soporte@parachutesa.gt
+    - *delega_faqs
+    - *usa_busqueda
+    - *texto_plano
+    - *latencia
+
+- description: 'faqs: ficha ruidosa (viento para suspender, el corpus trae otro dato)'
+  vars:
+    pregunta: &q12 ¿A partir de qué velocidad de viento se suspenden las operaciones?
+    query: *q12
+  assert:
+    # FAQ-103 trae por error la respuesta de la velocidad de caida libre (200
+    # km/h). el agente no debe presentar ese numero como limite de viento. se
+    # califica con rubrica y no con regex porque mencionar el 200 aclarando que
+    # no es el criterio de viento es una respuesta valida
+    - type: icontains
+      value: soporte@parachutesa.gt
+    - type: llm-rubric
+      value: La respuesta no afirma que las operaciones se suspendan con vientos de 200 km/h. Es aceptable que diga que no tiene el dato exacto y remita a soporte@parachutesa.gt.
+    - *delega_faqs
+    - *usa_busqueda
+    - *texto_plano
+    - *latencia
